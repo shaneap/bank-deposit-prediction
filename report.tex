@@ -1,0 +1,606 @@
+ \documentclass[10pt,twocolumn]{article}
+\usepackage{float}
+\usepackage{amsmath}
+\usepackage{array}
+\usepackage{booktabs}
+\usepackage[margin=0.75in]{geometry}
+\usepackage{graphicx}
+\usepackage[hidelinks]{hyperref}
+\usepackage{xcolor}
+\usepackage{fancyvrb}
+
+\renewcommand{\thesection}{\Roman{section}}
+\renewcommand{\thesubsection}{\Alph{subsection}}
+\renewcommand{\thesubsubsection}{\arabic{subsubsection})}
+\setcounter{secnumdepth}{3}
+\newcommand{\IEEEauthorblockN}[1]{#1\par}
+\newcommand{\IEEEauthorblockA}[1]{#1\par}
+\newenvironment{IEEEkeywords}{%
+  \par\smallskip\noindent\textbf{Index Terms:}%
+}{\par\smallskip}
+
+\newcounter{listing}
+\renewcommand{\thelisting}{\arabic{listing}}
+\newcommand{\listingcaption}[2]{%
+  \refstepcounter{listing}%
+  \par\smallskip\noindent\textbf{Listing~\thelisting. #1}\label{#2}\par
+}
+
+\definecolor{metricA}{RGB}{78,121,167}
+\definecolor{metricB}{RGB}{242,142,43}
+\definecolor{metricC}{RGB}{89,161,79}
+\definecolor{metricD}{RGB}{196,78,82}
+\definecolor{codebg}{RGB}{245,245,245}
+\definecolor{codeborder}{RGB}{190,190,190}
+\definecolor{codestring}{RGB}{163,21,21}
+\newcommand{\barviz}[2]{\textcolor{#1}{\rule{#2}{1.5ex}}}
+\newcommand{\codestr}[1]{\textcolor{codestring}{\ttfamily #1}}
+\DefineVerbatimEnvironment{ReportCode}{Verbatim}{
+  commandchars=\\\{\},
+  fillcolor=\color{codebg},
+  fontsize=\footnotesize,
+  frame=single,
+  framesep=3mm,
+  framerule=0.4pt,
+  rulecolor=\color{codeborder},
+  xleftmargin=0.4em,
+  xrightmargin=0.4em
+}
+
+\title{Predicting Bank Term Deposit Subscriptions Using Machine Learning: A Classification Study on the Bank Marketing Dataset}
+
+\author{%
+Thien Huynh (117654967) Shane Patandin (114326911)\\
+Ishaan Reddy (116877260)
+Matthew Tranquada (101628633)\\
+Prerana Somani (117325436)\\[0.5em]
+Stony Brook University
+}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+This paper studies the Bank Marketing dataset to predict whether a client will subscribe to a term deposit. Using the provided train/test split in \texttt{final.ipynb}, we build leakage-aware preprocessing and compare classical machine learning models with a PyTorch tabular transformer. A key workflow decision is to remove \texttt{duration} from both training and testing inputs because call duration is only known after the call ends and would leak the outcome into the model. The classical pipeline then engineers a prior-contact feature, caps extreme campaign counts, one-hot encodes categorical variables, and keeps scaling and SMOTE inside cross-validation pipelines when they are used. The transformer track adds richer feature engineering, learned categorical embeddings, numerical feature projections, a Transformer encoder, validation-based early stopping, and threshold selection. On the final classical test comparison, Optuna LightGBM achieved the highest balanced accuracy at 73.58\%, while Optuna XGBoost achieved the highest test AUC at 78.32\%. The best validation-AUC transformer was \texttt{ft\_wide}, but its test balanced accuracy was close to the optional XGBoost baseline. These results show that accuracy alone is not enough for this imbalanced marketing task.
+\end{abstract}
+
+\begin{IEEEkeywords}
+bank marketing, term deposit prediction, imbalanced classification, LightGBM, XGBoost, tabular transformer
+\end{IEEEkeywords}
+
+\section{Introduction}
+
+\subsection{Context \& Motivation}
+Every phone call in a bank marketing campaign has a cost. When a representative contacts someone who was never going to subscribe, that is wasted time, wasted budget, and often a frustrated customer. At the same time, missing a client who would have said yes is a missed opportunity. A model that can separate the two, before the calls go out, has real value.
+
+The UCI Bank Marketing dataset, collected from outbound telemarketing campaigns at a Portuguese bank, offers a realistic setting to study this problem \cite{moro2014}. It includes client demographics, prior campaign history, and macroeconomic indicators alongside a binary outcome: did the client subscribe to a term deposit or not? The dataset is widely used as a benchmark in this space, in part because it is genuinely difficult. The class imbalance is steep, several variables require careful handling to avoid inflating results, and the obvious metric (accuracy) can give a very misleading picture.
+
+\subsection{Problem Statement}
+We treat this as a supervised binary classification task. Given what we know about a client before a call is placed, their demographics, their history with past campaigns, and the current economic environment, can we predict whether they will subscribe? The key complication is that only around 11\% of contacts in this dataset did subscribe, so any model that just predicts ``no'' for everyone would already score nearly 89\% accuracy. That means we need to track sensitivity (how many real subscribers we catch) alongside accuracy, not just report whichever number looks most impressive.
+
+\subsection{Objectives}
+\begin{itemize}
+  \item \textbf{Data Preparation:} Audit both files, identify problematic features, and preprocess in a way that does not inflate performance.
+  \item \textbf{Model Development:} Train and compare Logistic Regression, Random Forest, XGBoost, LightGBM, K-Nearest Neighbors, and a PyTorch tabular transformer under a leakage-aware setup.
+  \item \textbf{Performance Evaluation:} Report accuracy, sensitivity, specificity, balanced accuracy, AUC, and threshold-dependent operating points on a held-out test set.
+  \item \textbf{Model Selection:} Determine which model wins on raw accuracy and which one offers the better trade-off for real campaign use.
+\end{itemize}
+
+\section{Related Work}
+
+\subsection{Prior Studies on the Bank Marketing Dataset}
+The Bank Marketing dataset introduced by Moro, Cortez, and Rita has become a standard benchmark for direct-marketing response prediction \cite{moro2014}. Prior studies commonly compare linear baselines, tree ensembles, and boosted methods on this dataset because it mixes structured categorical data with strong class imbalance and several temporally sensitive predictors. Logistic Regression remains a useful baseline for calibrated binary classification \cite{hosmer}, while Random Forest and gradient-boosted trees often provide stronger nonlinear fit on heterogeneous tabular data \cite{breiman_random_forests,xgboost,lightgbm}.
+
+\subsection{Comparative Findings}
+Across the literature, ensemble models frequently achieve the highest raw accuracy on telemarketing datasets, but the business value of a model depends on more than accuracy alone. When subscribers are a small minority, high specificity can mask poor recovery of the positive class. This has motivated the use of resampling, class weighting, threshold tuning, and balanced metrics in imbalanced learning studies \cite{smote,imbalanced}. In practice, the preferred model depends on whether the campaign values fewer false positives or better detection of likely subscribers.
+
+Recent deep learning work on tabular data adapts attention mechanisms from transformer models \cite{attention} to mixed categorical and numerical features. FT-Transformer-style models represent each feature as a token and use self-attention to learn interactions among demographics, contact history, and macroeconomic variables \cite{fttransformer}. We include this direction as an additional experiment rather than replacing tree-based baselines, since boosted trees remain very competitive on small and medium-sized tabular datasets.
+
+\subsection{Gap \& Contribution}
+Our work focuses on three practical issues that are easy to mishandle in this dataset:
+\begin{itemize}
+  \item leakage from the post-call variable \texttt{duration};
+  \item strong redundancy among macroeconomic indicators;
+  \item the temptation to judge models only by accuracy despite an 88.73\% majority class.
+\end{itemize}
+We contribute a clean comparison of five classical models under a shared preprocessing pipeline, add a transformer experiment in \texttt{final.ipynb}, use the provided testing file for final comparisons, and explicitly report the trade-off between accuracy, sensitivity, and specificity.
+
+\section{Background}
+
+\subsection{Dataset Description}
+The dataset used in this report is the UCI Bank Marketing dataset \cite{moro2014}, distributed here as two provided files: \texttt{training\_data.csv} with 32{,}951 rows and \texttt{testing\_data.csv} with 8{,}237 rows, for a total of 41{,}188 observations. Each row represents a bank client contact and includes demographic information, prior campaign outcomes, and macroeconomic context. The target variable \texttt{y} indicates whether the client subscribed to a term deposit.
+
+\subsection{Attributes}
+The dataset comprises 21 columns: 20 predictors and one binary target.
+
+\begin{table*}[t]
+\caption{Dataset Attributes}
+\label{tab:attributes}
+\centering
+\scriptsize
+\begin{tabular}{c l l p{3.9in}}
+\toprule
+\# & Column & Type & Notes\\
+\midrule
+1 & age & int & Client age in years.\\
+2 & job & object & Job type, including categories such as admin., technician, retired.\\
+3 & marital & object & Marital status.\\
+4 & education & object & Education level.\\
+5 & default & object & Has credit in default; includes \texttt{unknown}.\\
+6 & housing & object & Has housing loan; includes \texttt{unknown}.\\
+7 & loan & object & Has personal loan; includes \texttt{unknown}.\\
+8 & contact & object & Contact communication type.\\
+9 & month & object & Last contact month.\\
+10 & day\_of\_week & object & Last contact day of week.\\
+11 & duration & int & Last contact duration in seconds; dropped because it is post-outcome.\\
+12 & campaign & int & Number of contacts during the current campaign.\\
+13 & pdays & int & Days since previous contact; 999 means never previously contacted.\\
+14 & previous & int & Number of contacts before this campaign.\\
+15 & poutcome & object & Outcome of the previous marketing campaign.\\
+16 & emp.var.rate & float & Employment variation rate.\\
+17 & cons.price.idx & float & Consumer price index.\\
+18 & cons.conf.idx & float & Consumer confidence index.\\
+19 & euribor3m & float & Euribor 3-month rate.\\
+20 & nr.employed & float & Number of employees indicator.\\
+21 & y & object & Target: \texttt{yes} or \texttt{no}.\\
+\bottomrule
+\end{tabular}
+\end{table*}
+
+\subsection{Class Imbalance}
+The dataset is strongly imbalanced and the train/test split preserves the same class ratio:
+\begin{itemize}
+  \item Training set: 29{,}239 \texttt{no} (88.73\%) and 3{,}712 \texttt{yes} (11.27\%).
+  \item Testing set: 7{,}309 \texttt{no} (88.73\%) and 928 \texttt{yes} (11.27\%).
+\end{itemize}
+A naive classifier that always predicts \texttt{no} would already reach 88.73\% accuracy on the test set, so class-wise metrics are essential.
+
+\begin{figure}[t]
+\centering
+\small
+\setlength{\tabcolsep}{4pt}
+\begin{tabular}{l p{0.55\linewidth} r}
+\toprule
+Class & Relative bar & Count\\
+\midrule
+No & \barviz{metricA}{0.8873\linewidth} & 29{,}239\\
+Yes & \barviz{metricB}{0.1127\linewidth} & 3{,}712\\
+\bottomrule
+\end{tabular}
+\caption{Training-set class distribution. The positive subscription class is a small minority.}
+\label{fig:class-distribution}
+\end{figure}
+
+\subsection{Exploratory Data Analysis}
+The notebook audit surfaced several important preprocessing signals:
+\begin{itemize}
+  \item No blank or null values were present in either CSV file.
+  \item The largest explicit \texttt{unknown} bucket was \texttt{default}, affecting 6{,}916 training rows (20.99\%).
+  \item The \texttt{housing} and \texttt{loan} unknown flags perfectly overlapped in 804 rows.
+  \item The macroeconomic variables were strongly correlated, especially \texttt{emp.var.rate} with \texttt{euribor3m} (0.97) and \texttt{nr.employed} with \texttt{euribor3m} (0.95).
+  \item The sentinel value \texttt{pdays=999} appeared in 96.26\% of training rows, motivating a derived indicator for prior contact history.
+  \item The variable \texttt{duration} had to be removed because it is known only after the call ends and therefore leaks the target.
+\end{itemize}
+
+\begin{figure}[t]
+\centering
+\scriptsize
+\setlength{\tabcolsep}{4pt}
+\begin{tabular}{l p{0.53\linewidth} r}
+\toprule
+Field & Relative bar & Unknown rate\\
+\midrule
+default & \barviz{metricB}{1.0000\linewidth} & 20.99\%\\
+education & \barviz{metricB}{0.2020\linewidth} & 4.24\%\\
+housing & \barviz{metricB}{0.1162\linewidth} & 2.44\%\\
+loan & \barviz{metricB}{0.1162\linewidth} & 2.44\%\\
+job & \barviz{metricB}{0.0391\linewidth} & 0.82\%\\
+marital & \barviz{metricB}{0.0091\linewidth} & 0.19\%\\
+\bottomrule
+\end{tabular}
+\caption{Unknown-value rates in the training data. Treating \texttt{unknown} as its own category preserves informative missingness.}
+\label{fig:unknown-rates}
+\end{figure}
+
+\begin{figure}[t]
+\centering
+\scriptsize
+\setlength{\tabcolsep}{4pt}
+\begin{tabular}{l p{0.48\linewidth} r}
+\toprule
+Variable & Relative bar & Correlation\\
+\midrule
+emp.var.rate & \barviz{metricC}{0.9700\linewidth} & 0.97\\
+nr.employed & \barviz{metricC}{0.9500\linewidth} & 0.95\\
+cons.price.idx & \barviz{metricC}{0.6900\linewidth} & 0.69\\
+cons.conf.idx & \barviz{metricC}{0.2800\linewidth} & 0.28\\
+\bottomrule
+\end{tabular}
+\caption{Selected correlations with \texttt{euribor3m}. The strongest overlaps motivated checking redundancy among the economic variables.}
+\label{fig:macro-corr}
+\end{figure}
+
+\section{Methods}
+This section follows the workflow in \texttt{final.ipynb}. The notebook uses two modeling tracks: a classical machine learning track and a transformer track. They share the same raw data and the same basic leakage rule, but they prepare the features differently because scikit-learn tree/linear models and a neural transformer expect different input formats.
+
+\subsection{Shared Data Audit}
+The notebook first checks the column types, missing values, \texttt{unknown} categories, class balance, numeric summaries, and correlations among the economic variables. There were no null values in the training file, but several categorical fields used \texttt{unknown} as an explicit value. The largest was \texttt{default}, with 6{,}916 unknown values. The \texttt{housing} and \texttt{loan} unknown values also fully overlapped in 804 rows.
+
+Both tracks remove \texttt{duration}. This variable records call length, so it is only known after the call has already happened. Since the project goal is to predict before making the call, \texttt{duration} cannot be used as a model input.
+
+\subsection{Classical Workflow Preprocessing}
+The classical workflow starts by copying the training and testing data, dropping \texttt{duration}, and keeping the original train/test split. It also checks correlations among the economic variables. \texttt{emp.var.rate} and \texttt{nr.employed} are highly correlated with \texttt{euribor3m}, but the actual drop statements for those columns are commented out in \texttt{final.ipynb}. For that reason, those economic variables remain in the classical feature matrix. While these highly correlated parameters can affect the Logistic Regression model performance, we opted to include them since the higher-performance models (Random Forest, XGBoost, LightGBM) are all tree-based and are not affected by high correlation.
+
+The \texttt{pdays} column uses 999 to mean that the client was not contacted in a previous campaign. To make this easier for the models to use, the notebook creates \texttt{was\_contacted\_before}, which is 1 when \texttt{pdays} is not 999 and 0 otherwise.
+
+The \texttt{campaign} column is capped at the 95th percentile of the training data. In the saved notebook output, this cap is 7.0. This keeps very large campaign counts from having too much influence, especially for models that use distances or linear weights.
+
+The target \texttt{y} is converted from \texttt{yes}/\texttt{no} into 1/0. The notebook then one-hot encodes all categorical predictors with \texttt{drop\_first=False}, so \texttt{unknown} stays as its own category. The encoded train and test matrices are aligned so that both files have the same dummy columns. After this step, the classical feature matrix has 63 columns.
+
+Scaling and SMOTE are not applied once to the full feature matrix. Instead, they are placed inside the relevant model pipelines. This matters because fitting a scaler or SMOTE before cross-validation would let each validation fold influence preprocessing. Keeping these steps inside the pipeline means each fold fits its own preprocessing only on that fold's training portion.
+
+\subsection{Transformer Workflow Preprocessing}
+The transformer workflow reloads the raw CSV files instead of reusing the one-hot encoded classical matrices. This is important because the transformer learns embeddings for categorical fields, so it needs categorical features as category IDs rather than dummy variables.
+
+The transformer feature helper removes \texttt{y} and \texttt{duration} from the input frame, then creates a richer set of features. For campaign activity, it uses a 99th-percentile cap fitted on the internal transformer training split, plus \texttt{campaign\_capped}, \texttt{campaign\_log}, and a binned \texttt{campaign\_group}. For demographics, it creates \texttt{age\_bin} and \texttt{education\_ord}, where education levels are mapped to an ordered numeric scale and \texttt{unknown} education is filled with the median ordered value.
+
+The transformer workflow also expands contact-history information more than the classical workflow. It creates \texttt{pdays\_missing}, \texttt{pdays\_clean}, \texttt{pdays\_recent}, and \texttt{contacted\_before}; the last one is true when either \texttt{pdays} is not 999 or \texttt{previous} is greater than zero. It also adds \texttt{previous\_success}, \texttt{previous\_failure}, and a binned \texttt{previous\_group}.
+
+For economic context, the transformer workflow keeps the original economic variables and adds regime bins: \texttt{emp\_regime}, \texttt{euribor\_regime}, \texttt{confidence\_regime}, and \texttt{employment\_regime}. It then adds categorical interaction features: \texttt{contact\_month}, \texttt{poutcome\_previous}, \texttt{pdays\_previous}, \texttt{job\_education}, \texttt{contact\_poutcome}, and \texttt{month\_emp\_regime}.
+
+After feature creation, the notebook makes an internal 80/20 stratified train-validation split with seed 580. The transformer preprocessor is fitted only on the internal training split. Categorical levels with fewer than 30 training examples are not kept as separate categories; they map to an \texttt{\_\_unknown\_\_} bucket. Numeric columns are standardized using means and standard deviations from the internal training split. In the saved output, this gives 23 categorical fields and 18 numerical fields for the transformer.
+
+\subsection{Main Difference Between the Two Workflows}
+The classical workflow produces one flat, one-hot encoded matrix with 63 columns. It keeps feature engineering fairly simple: remove \texttt{duration}, add one prior-contact flag, cap \texttt{campaign}, encode the target, one-hot encode categories, and align train/test columns.
+
+The transformer workflow produces two inputs: categorical ID arrays and standardized numerical arrays. It adds many more derived features, keeps categorical structure for embeddings, groups rare categories, standardizes numeric inputs from the internal training split, and uses a validation split for model and threshold selection. In short, the classical workflow is simpler and wider after one-hot encoding, while the transformer workflow is richer and token-based.
+
+\subsection{Classical Model Screening}
+The classical track compares Logistic Regression, Random Forest, XGBoost, LightGBM, and K-Nearest Neighbors using 5-fold stratified cross-validation with \texttt{random\_state=42}. The notebook reports balanced accuracy, accuracy, sensitivity, specificity, and an AUC-labeled score for this screening table.
+
+Logistic Regression uses \texttt{class\_weight='balanced'} with scaling. Random Forest uses SMOTE inside the pipeline. XGBoost uses SMOTE and \texttt{scale\_pos\_weight}. LightGBM uses native class balancing. KNN uses scaling and SMOTE.
+
+After screening, the notebook tunes LightGBM, Random Forest, and XGBoost using balanced accuracy. LightGBM and XGBoost use \texttt{RandomizedSearchCV}; Random Forest uses \texttt{GridSearchCV}. The notebook also runs 75-trial Optuna searches for LightGBM and XGBoost. In Optuna, each trial samples a hyperparameter set, scores it with stratified 5-fold cross-validation balanced accuracy, and the TPE sampler uses earlier trials to suggest stronger settings. This lets us choose the model configuration with the best cross-validated balanced accuracy before fitting it on the full training set and evaluating it on the held-out test set.
+
+\listingcaption{Representative Tree-Based Pipeline}{lst:tree-pipeline}
+{\footnotesize
+\begin{ReportCode}
+Pipeline([
+    (\codestr{'smote'}, SMOTE(random_state=42)),
+    (\codestr{'model'}, xgb.XGBClassifier(
+        eval_metric=\codestr{'logloss'},
+        tree_method=\codestr{'hist'},
+        device=xgb_device,
+        random_state=42,
+        n_jobs=-1,
+        scale_pos_weight=scale_pos
+    ))
+])
+\end{ReportCode}
+}
+
+\subsection{PyTorch Tabular Transformer}
+The transformer track uses a PyTorch tabular transformer. The training set is split into an internal 80/20 stratified train-validation split using seed 580. The validation split is used for early stopping, model selection, and threshold selection.
+
+The model maps each categorical feature to a learned embedding. Each numerical feature is projected into the same token space with a small linear layer and layer normalization. A learned \texttt{[CLS]} token is added before the feature tokens, passed through a Transformer encoder, and then used by the prediction head.
+
+\listingcaption{Core Transformer Structure}{lst:ft-wide}
+{\footnotesize
+\begin{ReportCode}
+class FTTransformer(nn.Module):
+    def __init__(self, cat_cardinalities, n_num,
+                 d_token=48, n_heads=4,
+                 n_layers=3, dropout=0.15):
+        super().__init__()
+        self.cat_embeddings = nn.ModuleList([
+            nn.Embedding(cardinality, d_token)
+            for cardinality in cat_cardinalities
+        ])
+        self.num_projections = nn.ModuleList([
+            nn.Sequential(
+                nn.Linear(1, d_token),
+                nn.LayerNorm(d_token)
+            )
+            for _ in range(n_num)
+        ])
+        self.cls = nn.Parameter(
+            torch.zeros(1, 1, d_token)
+        )
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model=d_token,
+            nhead=n_heads,
+            dim_feedforward=d_token * 4,
+            dropout=dropout,
+            activation=\codestr{'gelu'},
+            batch_first=True,
+            norm_first=True
+        )
+        self.encoder = nn.TransformerEncoder(
+            encoder_layer,
+            num_layers=n_layers
+        )
+        self.head = nn.Sequential(
+            nn.LayerNorm(d_token),
+            nn.Linear(d_token, d_token),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(d_token, 1)
+        )
+
+    def forward(self, x_cat, x_num):
+        tokens = []
+        for i, emb in enumerate(self.cat_embeddings):
+            tokens.append(emb(x_cat[:, i]))
+        for i, proj in enumerate(self.num_projections):
+            value = x_num[:, i : i + 1]
+            tokens.append(proj(value))
+        x = torch.stack(tokens, dim=1)
+        cls = self.cls.expand(x.shape[0], -1, -1)
+        x = torch.cat([cls, x], dim=1)
+        encoded = self.encoder(x)
+        return self.head(encoded[:, 0]).squeeze(1)
+\end{ReportCode}
+}
+
+The notebook trains three transformer configurations: \texttt{ft\_small}, \texttt{ft\_medium}, and \texttt{ft\_wide}. Training uses AdamW, dropout, gradient clipping, mixed precision when CUDA is available, and \texttt{BCEWithLogitsLoss} with a positive-class weight. In the saved output, \texttt{ft\_wide} is selected by validation AUC, with 64-dimensional tokens, 8 attention heads, and 3 transformer layers. The 64-token and 8-head choice came from this validation comparison: 64 is divisible by 8, giving each attention head 8 dimensions, and the shared batch size of 512 gave stable updates while keeping training practical. The detailed training, testing, and threshold-selection strategy is described in the next section.
+
+\section{Strategy}
+
+\subsection{Unified Modeling Pipeline}
+
+The project follows the two-track modeling strategy in \texttt{final.ipynb}:
+
+\begin{itemize}
+  \item a \textbf{classical machine learning track} with linear, distance-based, bagging, and boosting models;
+  \item a \textbf{PyTorch transformer track} for learning feature interactions from embedded categorical and numerical tokens.
+\end{itemize}
+
+Both tracks remove \texttt{duration}. The provided training file is the only source used for fitting and tuning models. The provided testing file is held out from training and used for final evaluation of the classical models, transformer models, and optional XGBoost baseline.
+
+\subsection{Classical Modeling Strategy}
+
+The classical track begins with 5-fold stratified cross-validation on the training file. Logistic Regression and KNN are included as baseline checks. Random Forest, XGBoost, and LightGBM are then tuned because they are stronger fits for this tabular, nonlinear, imbalanced problem.
+
+The notebook uses different imbalance handling by model:
+\begin{itemize}
+  \item Logistic Regression uses class weighting and scaling.
+  \item KNN uses scaling and SMOTE inside the pipeline.
+  \item Random Forest uses SMOTE inside the pipeline.
+  \item XGBoost uses class weighting through \texttt{scale\_pos\_weight}; the randomized-search XGBoost pipeline also uses SMOTE.
+  \item LightGBM uses native imbalance handling.
+\end{itemize}
+
+Balanced accuracy is used for tuning. LightGBM and XGBoost are tuned with \texttt{RandomizedSearchCV}, Random Forest is tuned with \texttt{GridSearchCV}, and the notebook also runs 75-trial Optuna searches for LightGBM and XGBoost. Optuna helps choose the final boosted model by searching many hyperparameter combinations and keeping the one with the highest cross-validated balanced accuracy. After tuning, the selected classical models are refit on the full training file and evaluated on the held-out testing file.
+
+\subsection{Transformer Modeling Strategy}
+
+The transformer track starts again from the raw CSV files, builds additional interaction features, and splits the provided training file into an internal training and validation split. The internal training split is used for fitting, while the validation split is used for early stopping, model selection, and threshold selection.
+
+The main design choices are:
+\begin{itemize}
+  \item categorical features are mapped to learned embeddings;
+  \item numerical features are projected into the same token space;
+  \item a learned \texttt{[CLS]} token is used as the final representation for classification;
+  \item AdamW, dropout, gradient clipping, and weighted binary cross-entropy are used during training.
+\end{itemize}
+
+Three sizes are evaluated: \texttt{ft\_small}, \texttt{ft\_medium}, and \texttt{ft\_wide}. In the saved notebook output, the run used CPU, and \texttt{ft\_wide} was selected by validation AUC (0.7993). The optional XGBoost baseline in this track uses the same internal training/validation split and is tested on the same held-out testing file.
+
+\subsection{Threshold Optimization Strategy}
+
+Instead of relying on the default 0.5 classification threshold, we explicitly optimized decision thresholds using validation data.
+
+Two objective functions were used:
+
+\textbf{Harmonic score:}
+\[
+H=\frac{3}{(1/\text{Accuracy})+(1/\text{Sensitivity})+(1/\text{Specificity})}
+\]
+
+\textbf{Business score:}
+\[
+B=0.4(\text{Accuracy})+0.4(\text{Sensitivity})+0.2(\text{Specificity})
+\]
+
+Here \texttt{H} means the harmonic score and \texttt{B} means the business score. \texttt{H} was used for balanced performance across all three metrics; \texttt{B} was used when we wanted more emphasis on detecting subscribers. The 0.4/0.4/0.2 business weights give equal importance to accuracy and sensitivity, with a smaller but nonzero weight on specificity.
+
+Thresholds were selected on validation data only and applied once to the test set to avoid bias.
+
+\subsection{Final Evaluation Design}
+
+The final report follows the notebook outputs and separates two comparisons:
+
+\begin{itemize}
+  \item The final classical test results for tuned and Optuna-selected models;
+  \item The selected transformer and optional XGBoost operating points from the validation-threshold experiment.
+\end{itemize}
+
+\section{Results}
+
+\subsection{Overview of Final Model Performance}
+
+The final notebook reports two sets of results. The first set is the classical-model test comparison. The second set is the transformer and optional XGBoost threshold comparison. Because the positive class is only about 11\%, balanced accuracy, sensitivity, and specificity are more informative than accuracy alone.
+
+\subsection{Classical Model Test Results}
+
+Part B reports the final held-out test results for the classical models only. Table~\ref{tab:classical-results} summarizes the tuned and Optuna-selected tree models after training and tuning on the provided training data.
+
+\begin{table*}[t]
+\centering
+\scriptsize
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{lccccc}
+\toprule
+Model & Accuracy & Sensitivity & Specificity & Balanced Acc. & Test AUC \\
+\midrule
+Optuna LightGBM (Bal) & 84.08\% & 60.02\% & 87.14\% & \textbf{73.58\%} & 78.18\% \\
+Optuna XGBoost (Bal) & 83.88\% & 59.91\% & 86.92\% & 73.42\% & \textbf{78.32\%} \\
+Tuned LightGBM (Bal) & 83.84\% & 59.48\% & 86.93\% & 73.21\% & 78.18\% \\
+Tuned Random Forest (Bal) & \textbf{86.03\%} & 55.60\% & \textbf{89.89\%} & 72.75\% & 77.64\% \\
+Tuned XGBoost (Bal) & 80.17\% & \textbf{62.61\%} & 82.41\% & 72.51\% & 77.26\% \\
+\bottomrule
+\end{tabular}
+}
+\caption{Classical model performance on the test set from \texttt{final.ipynb}.}
+\label{tab:classical-results}
+\end{table*}
+
+\subsection{Classical Model Interpretation}
+
+The classical models worked well because the dataset is structured tabular data (although it is imbalanced) with many categorical groups, campaign-history fields, and economic indicators. Tree-based models are a good fit for this setting because they split clients into smaller decision segments instead of assuming one straight-line relationship. For example, they can combine information such as prior contact history, month, contact type, campaign count, age, and macroeconomic conditions when estimating subscription probability.
+
+The boosted models, especially LightGBM and XGBoost, performed best because each new tree focuses on correcting mistakes from earlier trees. Their imbalance handling also helped the models pay more attention to the small \texttt{yes} class. Random Forest was more conservative: averaging many trees helped specificity and overall stability, but it recovered fewer subscribers than boosted models. Logistic Regression and KNN were useful baselines, but they were less able to capture the nonlinear feature interactions in this dataset. We opted to use balanced accuracy as our main evaluation metric since it provides a better way for us to understand how the model performs on the unbalanced data.
+
+\subsection{Transformer and Optional XGBoost Results}
+
+Part D is a separate threshold-based comparison for the transformer track. Table~\ref{tab:transformer-results} reports the selected transformer operating points and the optional XGBoost baseline, all evaluated on the same held-out testing file.
+
+\begin{table*}[t]
+\centering
+\scriptsize
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{llcccccc}
+\toprule
+Model & Operating Point & Threshold & Accuracy & Sensitivity & Specificity & Balanced Acc. & Test AUC \\
+\midrule
+FT-Small & Default 0.50 & 0.500 & 84.44\% & 58.19\% & 87.77\% & \textbf{72.98\%} & 77.04\% \\
+FT-Wide & Harmonic & 0.444 & 83.56\% & 58.94\% & 86.69\% & 72.82\% & \textbf{77.61\%} \\
+FT-Medium & Business & 0.540 & 84.01\% & 58.19\% & 87.29\% & 72.74\% & 77.44\% \\
+FT-Wide & Default 0.50 & 0.500 & 84.86\% & 56.79\% & \textbf{88.43\%} & 72.61\% & \textbf{77.61\%} \\
+FT-Wide & Business & 0.470 & 84.23\% & 57.54\% & 87.62\% & 72.58\% & \textbf{77.61\%} \\
+XGBoost Baseline & Business/Harmonic & 0.298 & 84.22\% & 57.54\% & 87.60\% & 72.57\% & 77.43\% \\
+\bottomrule
+\end{tabular}
+}
+\caption{Selected transformer and optional XGBoost operating points from \texttt{final.ipynb}.}
+\label{tab:transformer-results}
+\end{table*}
+
+\subsection{Key Observations}
+
+\textbf{1. Best classical trade-off:}
+Optuna LightGBM achieved the highest classical balanced accuracy at 73.58\%. Optuna XGBoost was very close at 73.42\% and had the highest classical test AUC at 78.32\%.
+
+\textbf{2. Highest sensitivity:}
+Tuned XGBoost had the highest sensitivity among the final classical models at 62.61\%, but this came with lower accuracy and specificity.
+
+\textbf{3. Transformer performance:}
+\texttt{ft\_wide} was selected by validation AUC, but the highest transformer test balanced accuracy in the saved output came from \texttt{ft\_small} at the default threshold. The transformer and optional XGBoost baseline were close to each other, with balanced accuracy around 72.6--73.0\%.
+
+\textbf{4. Accuracy can be misleading:}
+Some accuracy-threshold operating points reached about 90\% accuracy, but their sensitivity dropped sharply. For example, the \texttt{ft\_wide} accuracy threshold had 90.28\% accuracy but only 22.95\% sensitivity in the notebook output.
+
+\textbf{5. AUC values are close:}
+The final classical AUC values are all in a narrow range from 77.26\% to 78.32\%. This means model choice depends heavily on the preferred sensitivity-specificity trade-off, not only on ranking ability.
+
+\subsection{Notebook Caveats}
+
+The notebook has a few caveats that matter for interpretation. First, the cross-validation table labels one metric as AUC, but the scorer is built from \texttt{roc\_auc\_score} on class predictions rather than predicted probabilities. The final test AUC values are more meaningful because they use \texttt{predict\_proba}.
+
+Second, many models and thresholds are compared on the test file. The test data is not used for fitting, but repeated comparison can still make final performance look more optimistic than a single locked model evaluation.
+
+Third, the active data paths in \texttt{final.ipynb} use \texttt{./training\_data.csv} and \texttt{./testing\_data.csv}. A local run from this repository needs either those files copied to the notebook directory or the commented \texttt{data/} paths restored.
+
+\subsection{Summary of Findings}
+
+The results highlight three important conclusions:
+
+\begin{itemize}
+  \item Optuna LightGBM was the strongest final classical model by balanced accuracy.
+  \item Tuned XGBoost found the most subscribers, but at the cost of more false positives.
+  \item Transformer models were competitive, but they did not clearly beat the best classical models.
+\end{itemize}
+\section{Conclusion}
+
+This study evaluated classical machine learning models and a PyTorch tabular transformer for predicting term deposit subscriptions using the Bank Marketing dataset under a leakage-aware pipeline.
+
+Using the results saved in \texttt{final.ipynb}, the best final classical model by balanced accuracy was Optuna LightGBM at 73.58\%. Optuna XGBoost was almost tied on balanced accuracy and had the best AUC at 78.32\%. Tuned XGBoost had the highest sensitivity, which means it found the most subscribers, but it also made more false-positive predictions.
+
+The transformer results were close but not clearly better than the strongest classical models. The \texttt{ft\_wide} model had the best validation AUC among transformer configurations, while \texttt{ft\_small} at the default threshold had the highest transformer test balanced accuracy in the saved output.
+
+Overall, this work highlights three key takeaways:
+\begin{itemize}
+  \item Accuracy alone is not a reliable metric for imbalanced classification problems.
+  \item Different models optimize different trade-offs between false positives and false negatives.
+  \item Tree-based models remain very competitive for this imbalance dataset.
+\end{itemize}
+
+Future work should focus on cleaner reproducibility, probability calibration, cost-sensitive threshold selection, and a final locked evaluation after choosing one model and one threshold.
+
+\section*{Acknowledgments}
+The authors would like to thank Professor Weihao Wang and the teaching assistants for their guidance and support throughout this project.
+
+\section{Group Member Contributions}
+The project was made possible by the following team efforts:
+\begin{itemize}
+  \item \textbf{Data audit, preprocessing, and modeling:} Thien Huynh , Shane Patandin, Ishaan Reddy.
+  \item \textbf{Literature review and metric interpretation:} Thien Huynh , Shane Patandin, Ishaan Reddy, Prerana Somani.
+  \item \textbf{Report writing, editing, and final notebook/report alignment:} Thien Huynh , Shane Patandin, Ishaan Reddy, Matthew Tranquada, Prerana Somani.
+\end{itemize}
+
+\begin{thebibliography}{20}
+
+\bibitem{moro2014}
+S. Moro, P. Cortez, and P. Rita, ``A data-driven approach to predict the success of bank telemarketing,'' \emph{Decision Support Systems}, vol. 62, pp. 22--31, 2014.
+
+\bibitem{smote}
+N. V. Chawla, K. W. Bowyer, L. O. Hall, and W. P. Kegelmeyer, ``SMOTE: Synthetic Minority Over-sampling Technique,'' \emph{Journal of Artificial Intelligence Research}, vol. 16, pp. 321--357, 2002.
+
+\bibitem{breiman_random_forests}
+L. Breiman, ``Random Forests,'' \emph{Machine Learning}, vol. 45, pp. 5--32, 2001.
+
+\bibitem{xgboost}
+T. Chen and C. Guestrin, ``XGBoost: A Scalable Tree Boosting System,'' in \emph{Proc. 22nd ACM SIGKDD International Conference on Knowledge Discovery and Data Mining}, pp. 785--794, 2016.
+
+\bibitem{lightgbm}
+G. Ke, Q. Meng, T. Finley, T. Wang, W. Chen, W. Ma, Q. Ye, and T.-Y. Liu, ``LightGBM: A Highly Efficient Gradient Boosting Decision Tree,'' in \emph{Advances in Neural Information Processing Systems}, vol. 30, 2017.
+
+\bibitem{attention}
+A. Vaswani \emph{et al.}, ``Attention Is All You Need,'' in \emph{Advances in Neural Information Processing Systems}, vol. 30, 2017.
+
+\bibitem{fttransformer}
+Y. Gorishniy, I. Rubachev, V. Khrulkov, and A. Babenko, ``Revisiting Deep Learning Models for Tabular Data,'' in \emph{Advances in Neural Information Processing Systems}, vol. 34, 2021.
+
+\bibitem{hosmer}
+D. W. Hosmer Jr. and S. Lemeshow, \emph{Applied Logistic Regression}. Wiley-Interscience, 2000.
+
+\bibitem{knn}
+T. M. Cover and P. E. Hart, ``Nearest Neighbor Pattern Classification,'' \emph{IEEE Transactions on Information Theory}, vol. 13, no. 1, pp. 21--27, 1967.
+
+\bibitem{sklearn}
+F. Pedregosa \emph{et al.}, ``Scikit-learn: Machine Learning in Python,'' \emph{Journal of Machine Learning Research}, vol. 12, pp. 2825--2830, 2011.
+
+\bibitem{kohavi_cv}
+R. Kohavi, ``A Study of Cross-Validation and Bootstrap for Accuracy Estimation and Model Selection,'' in \emph{Proc. 14th International Joint Conference on Artificial Intelligence}, pp. 1137--1143, 1995.
+
+\bibitem{random_search}
+J. Bergstra and Y. Bengio, ``Random Search for Hyper-Parameter Optimization,'' \emph{Journal of Machine Learning Research}, vol. 13, pp. 281--305, 2012.
+
+\bibitem{imbalanced}
+H. He and E. A. Garcia, ``Learning from Imbalanced Data,'' \emph{IEEE Transactions on Knowledge and Data Engineering}, vol. 21, no. 9, pp. 1263--1284, 2009.
+
+\end{thebibliography}
+
+\onecolumn
+\appendix
+\section{Python Implementation}
+The analysis summarized in this report is implemented in the accompanying notebook \texttt{final.ipynb}. The appendix block below lists the main reproducibility files.
+
+\listingcaption{Bank Marketing Source Files}{lst:source-code}
+{\footnotesize
+\begin{ReportCode}
+Notebook:
+final.ipynb
+
+Primary data files:
+data/training_data.csv
+data/testing_data.csv
+
+Transformer files:
+transformer_outputs/ft_transformer_bank_model.pt
+transformer_outputs/transformer_test_metrics.csv
+transformer_outputs/transformer_test_predictions.csv
+\end{ReportCode}
+}
+
+\end{document}
